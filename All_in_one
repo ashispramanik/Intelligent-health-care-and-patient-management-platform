@@ -1,0 +1,936 @@
+# Intelligent Healthcare Platform: all files in one document
+
+Each section is a file. Create it at the path shown in the heading.
+
+## `.gitignore`
+
+````bash
+node_modules
+dist
+.env
+````
+
+## `README.md`
+
+````md
+# Intelligent Healthcare Platform
+
+## Run locally
+```bash
+docker compose up -d                      # Postgres + Redis
+cd backend && cp .env.example .env && npm install
+npx prisma migrate dev --name init && npm run seed && npm run dev
+# new terminal
+cd frontend && npm install && npm run dev  # http://localhost:5173
+```
+
+## Demo accounts (development seed only)
+| Role | Email | Password |
+|---|---|---|
+| Admin | admin@medicore.local | Admin@12345 |
+| Doctor | doctor@medicore.local | Doctor@12345 |
+| Nurse | nurse@medicore.local | Nurse@12345 |
+| Front desk | frontdesk@medicore.local | Desk@12345 |
+| Lab | lab@medicore.local | Lab@12345 |
+| Pharmacy | pharmacy@medicore.local | Pharma@12345 |
+| Patient | patient@medicore.local | Patient@12345 |
+
+The seed refuses to run when NODE_ENV=production. Create real staff via Admin > Users.
+````
+
+## `backend/.env.example`
+
+````bash
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/healthcare"
+JWT_ACCESS_SECRET="replace-with-32+-random-chars-aaaaaaaaaaaa"
+JWT_REFRESH_SECRET="replace-with-another-32+-random-chars-bbbbbbbb"
+CORS_ORIGIN="http://localhost:5173"
+PORT=4000
+````
+
+## `backend/Dockerfile`
+
+````bash
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json ./
+RUN npm install
+COPY . .
+RUN npx prisma generate && npm run build
+CMD ["sh","-c","npx prisma migrate deploy && node dist/src/server.js"]
+````
+
+## `backend/package.json`
+
+````json
+{
+  "name": "healthcare-backend",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/src/server.js",
+    "seed": "tsx prisma/seed.ts",
+    "db:migrate": "prisma migrate dev"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^5.0.1",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.7.0",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "prisma": { "seed": "tsx prisma/seed.ts" }
+}
+````
+
+## `backend/prisma/schema.prisma`
+
+````prisma
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "postgresql"
+  url = env("DATABASE_URL") }
+
+enum RoleName { ADMIN DOCTOR NURSE RECEPTIONIST LAB PHARMACIST PATIENT }
+enum UserStatus { ACTIVE SUSPENDED }
+enum VerificationStatus { PENDING VERIFIED REJECTED }
+enum AppointmentStatus { SCHEDULED CHECKED_IN IN_PROGRESS COMPLETED CANCELLED NO_SHOW }
+
+model User {
+  id           String     @id @default(uuid())
+  name         String
+  email        String     @unique
+  passwordHash String
+  status       UserStatus @default(ACTIVE)
+  failedLogins Int        @default(0)
+  lockedUntil  DateTime?
+  mustChangePassword Boolean @default(false)
+  createdAt    DateTime   @default(now())
+  roles        UserRole[]
+  patient      Patient?
+  doctor       Doctor?
+  auditLogs    AuditLog[]
+}
+model Role { id Int @id @default(autoincrement())
+  name  RoleName @unique
+  users UserRole[] }
+model UserRole {
+  userId String
+  roleId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id])
+  @@id([userId, roleId])
+}
+model Department { id String @id @default(uuid())
+  name String @unique
+  description String?
+  doctors Doctor[] }
+model Patient {
+  id String @id @default(uuid())
+  userId String @unique
+  user User @relation(fields: [userId], references: [id])
+  dateOfBirth DateTime?
+  phone String?
+  emergencyContact String?
+  appointments Appointment[]
+}
+model Doctor {
+  id String @id @default(uuid())
+  userId String @unique
+  user User @relation(fields: [userId], references: [id])
+  departmentId String
+  department Department @relation(fields: [departmentId], references: [id])
+  speciality String
+  qualifications String?
+  verificationStatus VerificationStatus @default(PENDING)
+  schedules DoctorSchedule[]
+  appointments Appointment[]
+}
+model DoctorSchedule {
+  id String @id @default(uuid())
+  doctorId String
+  doctor Doctor @relation(fields: [doctorId], references: [id])
+  weekday Int
+  startTime String
+  endTime String
+}
+model Appointment {
+  id String @id @default(uuid())
+  patientId String
+  doctorId String
+  patient Patient @relation(fields: [patientId], references: [id])
+  doctor Doctor @relation(fields: [doctorId], references: [id])
+  startAt DateTime
+  endAt DateTime
+  status AppointmentStatus @default(SCHEDULED)
+  reason String?
+  createdAt DateTime @default(now())
+  @@index([doctorId, startAt])
+  @@index([patientId, startAt])
+}
+model AuditLog {
+  id String @id @default(uuid())
+  actorId String?
+  actor User? @relation(fields: [actorId], references: [id])
+  action String
+  resourceType String
+  resourceId String?
+  timestamp DateTime @default(now())
+  @@index([actorId, timestamp])
+}
+````
+
+## `backend/prisma/seed.ts`
+
+````ts
+import { PrismaClient, RoleName } from "@prisma/client";
+import bcrypt from "bcryptjs";
+const prisma = new PrismaClient();
+
+// DEVELOPMENT-ONLY credentials. Never seed these in production.
+const users: { name: string; email: string; password: string; role: RoleName }[] = [
+  { name: "Hospital Admin", email: "admin@medicore.local", password: "Admin@12345", role: "ADMIN" },
+  { name: "Dr. Rohan Mehta", email: "doctor@medicore.local", password: "Doctor@12345", role: "DOCTOR" },
+  { name: "Nurse Anita Das", email: "nurse@medicore.local", password: "Nurse@12345", role: "NURSE" },
+  { name: "Front Desk Riya", email: "frontdesk@medicore.local", password: "Desk@12345", role: "RECEPTIONIST" },
+  { name: "Lab Tech Sameer", email: "lab@medicore.local", password: "Lab@12345", role: "LAB" },
+  { name: "Pharmacist Neha", email: "pharmacy@medicore.local", password: "Pharma@12345", role: "PHARMACIST" },
+  { name: "Arjun Sharma", email: "patient@medicore.local", password: "Patient@12345", role: "PATIENT" },
+];
+
+async function main() {
+  if (process.env.NODE_ENV === "production") throw new Error("Refusing to seed demo users in production");
+  for (const name of Object.values(RoleName)) {
+    await prisma.role.upsert({ where: { name }, update: {}, create: { name } });
+  }
+  const dept = await prisma.department.upsert({
+    where: { name: "Cardiology" }, update: {}, create: { name: "Cardiology", description: "Heart care" },
+  });
+  for (const u of users) {
+    const role = await prisma.role.findUniqueOrThrow({ where: { name: u.role } });
+    const user = await prisma.user.upsert({
+      where: { email: u.email },
+      update: {},
+      create: {
+        name: u.name, email: u.email, passwordHash: await bcrypt.hash(u.password, 12),
+        roles: { create: { roleId: role.id } },
+      },
+    });
+    if (u.role === "DOCTOR") {
+      const doc = await prisma.doctor.upsert({
+        where: { userId: user.id }, update: {},
+        create: { userId: user.id, departmentId: dept.id, speciality: "Cardiologist", verificationStatus: "VERIFIED" },
+      });
+      if (!(await prisma.doctorSchedule.findFirst({ where: { doctorId: doc.id } }))) {
+        await prisma.doctorSchedule.createMany({
+          data: [1, 2, 3, 4, 5].map((weekday) => ({ doctorId: doc.id, weekday, startTime: "09:00", endTime: "17:00" })),
+        });
+      }
+    }
+    if (u.role === "PATIENT") {
+      await prisma.patient.upsert({ where: { userId: user.id }, update: {}, create: { userId: user.id } });
+    }
+  }
+  console.log("Seed complete");
+}
+main().finally(() => prisma.$disconnect());
+````
+
+## `backend/src/app.ts`
+
+````ts
+import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import cookieParser from "cookie-parser";
+import { env } from "./config/env";
+import { authenticate } from "./middleware/authenticate";
+import { errorHandler } from "./middleware/error-handler";
+import { authRouter } from "./routes/auth";
+import { appointmentsRouter } from "./routes/appointments";
+import { usersRouter } from "./routes/users";
+
+export const app = express();
+app.use(helmet());
+app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
+app.use(express.json({ limit: "1mb" }));
+app.use(cookieParser());
+app.get("/api/health", (_req, res) => res.json({ ok: true }));
+app.use("/api/auth", authRouter);
+app.use("/api/appointments", authenticate, appointmentsRouter);
+app.use("/api/users", authenticate, usersRouter);
+app.use(errorHandler);
+````
+
+## `backend/src/config/env.ts`
+
+````ts
+import "dotenv/config";
+import { z } from "zod";
+export const env = z.object({
+  PORT: z.coerce.number().default(4000),
+  JWT_ACCESS_SECRET: z.string().min(32),
+  JWT_REFRESH_SECRET: z.string().min(32),
+  CORS_ORIGIN: z.string().default("http://localhost:5173"),
+  NODE_ENV: z.string().default("development"),
+}).parse(process.env);
+````
+
+## `backend/src/lib/prisma.ts`
+
+````ts
+import { PrismaClient } from "@prisma/client";
+export const prisma = new PrismaClient();
+export const audit = (actorId: string | undefined, action: string, resourceType: string, resourceId?: string) =>
+  prisma.auditLog.create({ data: { actorId, action, resourceType, resourceId } }).catch(() => undefined);
+````
+
+## `backend/src/middleware/authenticate.ts`
+
+````ts
+import { NextFunction, Request, Response } from "express";
+import jwt from "jsonwebtoken";
+import { env } from "../config/env";
+
+export type AuthUser = { id: string; roles: string[] };
+declare global { namespace Express { interface Request { user?: AuthUser } } }
+
+export function authenticate(req: Request, res: Response, next: NextFunction) {
+  const h = req.headers.authorization;
+  if (!h?.startsWith("Bearer ")) return res.status(401).json({ error: "Unauthenticated" });
+  try {
+    const p = jwt.verify(h.slice(7), env.JWT_ACCESS_SECRET) as { sub: string; roles: string[] };
+    req.user = { id: p.sub, roles: p.roles };
+    next();
+  } catch { res.status(401).json({ error: "Invalid or expired token" }); }
+}
+````
+
+## `backend/src/middleware/authorize.ts`
+
+````ts
+import { NextFunction, Request, Response } from "express";
+export const authorize = (...allowed: string[]) => (req: Request, res: Response, next: NextFunction) =>
+  req.user?.roles.some((r) => allowed.includes(r)) ? next() : res.status(403).json({ error: "Forbidden" });
+````
+
+## `backend/src/middleware/error-handler.ts`
+
+````ts
+import { NextFunction, Request, Response } from "express";
+import { ZodError } from "zod";
+export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
+  if (err instanceof ZodError) return res.status(400).json({ error: "Validation failed", details: err.flatten() });
+  console.error(err);
+  res.status(500).json({ error: "Internal server error" });
+}
+````
+
+## `backend/src/routes/appointments.ts`
+
+````ts
+import { Router } from "express";
+import { z } from "zod";
+import { audit, prisma } from "../lib/prisma";
+import { authorize } from "../middleware/authorize";
+
+export const appointmentsRouter = Router();
+const STAFF = ["ADMIN", "RECEPTIONIST", "NURSE"];
+const include = { doctor: { include: { user: { select: { name: true } } } }, patient: { include: { user: { select: { name: true } } } } };
+
+appointmentsRouter.get("/doctors", async (_req, res) => {
+  res.json(await prisma.doctor.findMany({ where: { verificationStatus: "VERIFIED" }, include: { user: { select: { name: true } }, department: true, schedules: true } }));
+});
+
+appointmentsRouter.get("/", async (req, res) => {
+  const roles = req.user!.roles;
+  let where = {};
+  if (roles.includes("PATIENT")) where = { patient: { userId: req.user!.id } };
+  else if (roles.includes("DOCTOR")) where = { doctor: { userId: req.user!.id } };
+  else if (!roles.some((r) => STAFF.includes(r))) return res.status(403).json({ error: "Forbidden" });
+  res.json(await prisma.appointment.findMany({ where, include, orderBy: { startAt: "asc" }, take: 200 }));
+});
+
+const bookSchema = z.object({ doctorId: z.string().uuid(), startAt: z.coerce.date(), reason: z.string().max(500).optional(), patientId: z.string().uuid().optional() });
+
+appointmentsRouter.post("/", authorize("PATIENT", "RECEPTIONIST", "ADMIN"), async (req, res) => {
+  const b = bookSchema.parse(req.body);
+  if (b.startAt < new Date()) return res.status(400).json({ error: "Cannot book in the past" });
+  const endAt = new Date(b.startAt.getTime() + 30 * 60_000);
+  let patientId = b.patientId;
+  if (req.user!.roles.includes("PATIENT")) {
+    const me = await prisma.patient.findUnique({ where: { userId: req.user!.id } });
+    if (!me) return res.status(400).json({ error: "No patient profile" });
+    patientId = me.id;
+  }
+  if (!patientId) return res.status(400).json({ error: "patientId required" });
+  const clash = await prisma.appointment.findFirst({
+    where: { doctorId: b.doctorId, status: { notIn: ["CANCELLED", "NO_SHOW"] }, startAt: { lt: endAt }, endAt: { gt: b.startAt } },
+  });
+  if (clash) return res.status(409).json({ error: "Slot already booked" });
+  const appt = await prisma.appointment.create({ data: { patientId, doctorId: b.doctorId, startAt: b.startAt, endAt, reason: b.reason }, include });
+  await audit(req.user!.id, "APPOINTMENT_CREATE", "Appointment", appt.id);
+  res.status(201).json(appt);
+});
+
+appointmentsRouter.patch("/:id/status", async (req, res) => {
+  const { status } = z.object({ status: z.enum(["CHECKED_IN", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW"]) }).parse(req.body);
+  const appt = await prisma.appointment.findUnique({ where: { id: req.params.id }, include: { patient: true, doctor: true } });
+  if (!appt) return res.status(404).json({ error: "Not found" });
+  const roles = req.user!.roles;
+  const isOwnerPatient = roles.includes("PATIENT") && appt.patient.userId === req.user!.id;
+  const isOwnerDoctor = roles.includes("DOCTOR") && appt.doctor.userId === req.user!.id;
+  const allowed = roles.some((r) => ["ADMIN", "RECEPTIONIST"].includes(r)) || (isOwnerPatient && status === "CANCELLED") || (isOwnerDoctor && ["IN_PROGRESS", "COMPLETED", "NO_SHOW"].includes(status));
+  if (!allowed) return res.status(403).json({ error: "Forbidden" });
+  const updated = await prisma.appointment.update({ where: { id: appt.id }, data: { status }, include });
+  await audit(req.user!.id, `APPOINTMENT_${status}`, "Appointment", appt.id);
+  res.json(updated);
+});
+````
+
+## `backend/src/routes/auth.ts`
+
+````ts
+import { Router } from "express";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
+import { z } from "zod";
+import { env } from "../config/env";
+import { audit, prisma } from "../lib/prisma";
+import { authenticate } from "../middleware/authenticate";
+
+export const authRouter = Router();
+const loginLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 20 });
+const cookieOpts = { httpOnly: true, sameSite: "lax" as const, secure: env.NODE_ENV === "production", path: "/api/auth" };
+
+const publicUser = (u: { id: string; name: string; email: string; roles: { role: { name: string } }[] }) =>
+  ({ id: u.id, name: u.name, email: u.email, roles: u.roles.map((r) => r.role.name) });
+
+const sign = (id: string, roles: string[]) => ({
+  access: jwt.sign({ sub: id, roles }, env.JWT_ACCESS_SECRET, { expiresIn: "15m" }),
+  refresh: jwt.sign({ sub: id }, env.JWT_REFRESH_SECRET, { expiresIn: "7d" }),
+});
+
+authRouter.post("/login", loginLimiter, async (req, res) => {
+  const { email, password } = z.object({ email: z.string().email(), password: z.string().min(1) }).parse(req.body);
+  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() }, include: { roles: { include: { role: true } } } });
+  const fail = () => res.status(401).json({ error: "Invalid email or password" });
+  if (!user || user.status !== "ACTIVE") return fail();
+  if (user.lockedUntil && user.lockedUntil > new Date()) return res.status(423).json({ error: "Account temporarily locked. Try later." });
+  if (!(await bcrypt.compare(password, user.passwordHash))) {
+    const failed = user.failedLogins + 1;
+    await prisma.user.update({ where: { id: user.id }, data: { failedLogins: failed, lockedUntil: failed >= 5 ? new Date(Date.now() + 15 * 60_000) : null } });
+    await audit(user.id, "LOGIN_FAILED", "User", user.id);
+    return fail();
+  }
+  await prisma.user.update({ where: { id: user.id }, data: { failedLogins: 0, lockedUntil: null } });
+  const u = publicUser(user);
+  const t = sign(u.id, u.roles);
+  res.cookie("rt", t.refresh, { ...cookieOpts, maxAge: 7 * 864e5 });
+  await audit(u.id, "LOGIN", "User", u.id);
+  res.json({ accessToken: t.access, user: u });
+});
+
+authRouter.post("/refresh", async (req, res) => {
+  try {
+    const p = jwt.verify(req.cookies.rt, env.JWT_REFRESH_SECRET) as { sub: string };
+    const user = await prisma.user.findUnique({ where: { id: p.sub }, include: { roles: { include: { role: true } } } });
+    if (!user || user.status !== "ACTIVE") throw new Error();
+    const u = publicUser(user);
+    res.json({ accessToken: sign(u.id, u.roles).access, user: u });
+  } catch { res.status(401).json({ error: "Session expired" }); }
+});
+
+authRouter.post("/logout", (_req, res) => { res.clearCookie("rt", cookieOpts); res.json({ ok: true }); });
+
+authRouter.get("/me", authenticate, async (req, res) => {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id }, include: { roles: { include: { role: true } } } });
+  res.json(publicUser(user));
+});
+````
+
+## `backend/src/routes/users.ts`
+
+````ts
+import { Router } from "express";
+import bcrypt from "bcryptjs";
+import { z } from "zod";
+import { audit, prisma } from "../lib/prisma";
+import { authorize } from "../middleware/authorize";
+
+export const usersRouter = Router();
+usersRouter.use(authorize("ADMIN"));
+
+usersRouter.get("/", async (_req, res) => {
+  const users = await prisma.user.findMany({ select: { id: true, name: true, email: true, status: true, createdAt: true, roles: { select: { role: { select: { name: true } } } } }, orderBy: { createdAt: "desc" } });
+  res.json(users.map((u) => ({ ...u, roles: u.roles.map((r) => r.role.name) })));
+});
+
+usersRouter.post("/", async (req, res) => {
+  const b = z.object({
+    name: z.string().min(2), email: z.string().email(),
+    password: z.string().min(10, "Use at least 10 characters"),
+    role: z.enum(["ADMIN", "DOCTOR", "NURSE", "RECEPTIONIST", "LAB", "PHARMACIST", "PATIENT"]),
+  }).parse(req.body);
+  if (await prisma.user.findUnique({ where: { email: b.email.toLowerCase() } })) return res.status(409).json({ error: "Email already exists" });
+  const role = await prisma.role.findUniqueOrThrow({ where: { name: b.role } });
+  const user = await prisma.user.create({
+    data: { name: b.name, email: b.email.toLowerCase(), passwordHash: await bcrypt.hash(b.password, 12), mustChangePassword: true, roles: { create: { roleId: role.id } } },
+  });
+  if (b.role === "PATIENT") await prisma.patient.create({ data: { userId: user.id } });
+  await audit(req.user!.id, "USER_CREATE", "User", user.id);
+  res.status(201).json({ id: user.id, email: user.email });
+});
+
+usersRouter.patch("/:id/status", async (req, res) => {
+  const { status } = z.object({ status: z.enum(["ACTIVE", "SUSPENDED"]) }).parse(req.body);
+  if (req.params.id === req.user!.id) return res.status(400).json({ error: "Cannot change your own status" });
+  await prisma.user.update({ where: { id: req.params.id }, data: { status } });
+  await audit(req.user!.id, `USER_${status}`, "User", req.params.id);
+  res.json({ ok: true });
+});
+````
+
+## `backend/src/server.ts`
+
+````ts
+import { app } from "./app";
+import { env } from "./config/env";
+app.listen(env.PORT, () => console.log(`API on :${env.PORT}`));
+````
+
+## `backend/tsconfig.json`
+
+````json
+{ "compilerOptions": { "target": "ES2022", "module": "commonjs", "outDir": "dist", "rootDir": ".", "strict": true, "esModuleInterop": true, "skipLibCheck": true }, "include": ["src", "prisma"] }
+````
+
+## `docker-compose.yml`
+
+````yaml
+services:
+  db:
+    image: postgres:16
+    environment: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: healthcare }
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+volumes: { pgdata: {} }
+````
+
+## `frontend/index.html`
+
+````html
+<!doctype html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>MediCore Health Platform</title></head>
+<body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>
+````
+
+## `frontend/package.json`
+
+````json
+{
+  "name": "healthcare-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite", "build": "tsc -b && vite build", "preview": "vite preview" },
+  "dependencies": {
+    "@tanstack/react-query": "^5.59.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0",
+    "react-hook-form": "^7.53.0",
+    "@hookform/resolvers": "^3.9.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.8"
+  }
+}
+````
+
+## `frontend/src/app/App.tsx`
+
+````ts
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { AuthProvider, homeFor, useAuth } from "../features/auth/AuthContext";
+import { LoginPage } from "../features/auth/LoginPage";
+import { AppLayout } from "../components/layout/AppLayout";
+import { AppointmentsPage } from "../pages/AppointmentsPage";
+import { UsersPage } from "../pages/UsersPage";
+import { RolePage } from "../pages/RolePage";
+import { ReactNode } from "react";
+
+const qc = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 30_000 } } });
+
+function Guard({ roles, children }: { roles?: string[]; children: ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="p-8">Loading…</div>;
+  if (!user) return <Navigate to="/login" replace />;
+  if (roles && !user.roles.some((r) => roles.includes(r))) return <Navigate to={homeFor(user)} replace />;
+  return <>{children}</>;
+}
+const Root = () => { const { user, loading } = useAuth(); return loading ? null : <Navigate to={user ? homeFor(user) : "/login"} replace />; };
+const page = (roles: string[], el: ReactNode) => <Guard roles={roles}>{el}</Guard>;
+
+export function App() {
+  return (
+    <QueryClientProvider client={qc}>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<Root />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route element={<Guard><AppLayout /></Guard>}>
+              <Route path="/appointments" element={<AppointmentsPage />} />
+              <Route path="/patient/dashboard" element={page(["PATIENT"], <RolePage title="Patient overview" items={["Upcoming appointments", "Prescriptions & reports", "Allergies, medications, vitals", "Bills & payments"]} />)} />
+              <Route path="/doctor/dashboard" element={page(["DOCTOR"], <RolePage title="Doctor overview" items={["Today's calendar", "Consultations & clinical notes", "Prescriptions", "Lab requests & results"]} />)} />
+              <Route path="/nurse/dashboard" element={page(["NURSE"], <RolePage title="Nurse station" items={["Record vital signs", "Patient triage queue", "Assist consultations"]} />)} />
+              <Route path="/admin/dashboard" element={page(["ADMIN"], <RolePage title="Hospital analytics" items={["Appointments & capacity", "Billing overview", "Audit logs & security alerts"]} />)} />
+              <Route path="/admin/users" element={page(["ADMIN"], <UsersPage />)} />
+              <Route path="/reception/queue" element={page(["RECEPTIONIST"], <RolePage title="Check-in & queue" items={["Patient registration", "Check-in (see Appointments)", "Waiting room queue"]} />)} />
+              <Route path="/lab/orders" element={page(["LAB"], <RolePage title="Laboratory orders" items={["Incoming test orders", "Sample tracking", "Enter & publish results"]} />)} />
+              <Route path="/pharmacy/inventory" element={page(["PHARMACIST"], <RolePage title="Medicine inventory" items={["Stock & batches", "Expiry alerts", "Dispensing history"]} />)} />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+    </QueryClientProvider>
+  );
+}
+````
+
+## `frontend/src/components/layout/AppLayout.tsx`
+
+````ts
+import { NavLink, Outlet } from "react-router-dom";
+import { useAuth } from "../../features/auth/AuthContext";
+
+const NAV: Record<string, [string, string][]> = {
+  ADMIN: [["/admin/dashboard", "Dashboard"], ["/admin/users", "Users"], ["/appointments", "Appointments"]],
+  DOCTOR: [["/doctor/dashboard", "Dashboard"], ["/appointments", "Schedule"]],
+  NURSE: [["/nurse/dashboard", "Dashboard"], ["/appointments", "Appointments"]],
+  RECEPTIONIST: [["/reception/queue", "Queue & Check-in"], ["/appointments", "Appointments"]],
+  LAB: [["/lab/orders", "Lab Orders"]],
+  PHARMACIST: [["/pharmacy/inventory", "Inventory"]],
+  PATIENT: [["/patient/dashboard", "Overview"], ["/appointments", "Appointments"]],
+};
+
+export function AppLayout() {
+  const { user, logout } = useAuth();
+  const links = NAV[user!.roles[0]] ?? [];
+  return (
+    <div className="flex min-h-screen bg-slate-50">
+      <aside className="w-56 shrink-0 bg-white p-4 shadow">
+        <div className="mb-6 text-xl font-bold text-blue-700">MediCore</div>
+        <nav className="space-y-1">
+          {links.map(([to, label]) => (
+            <NavLink key={to} to={to} className={({ isActive }) => `block rounded-lg px-3 py-2 text-sm ${isActive ? "bg-blue-600 text-white" : "text-slate-700 hover:bg-slate-100"}`}>{label}</NavLink>
+          ))}
+        </nav>
+      </aside>
+      <div className="flex-1">
+        <header className="flex items-center justify-between bg-white px-6 py-3 shadow-sm">
+          <span className="text-sm text-slate-500">{user!.roles.join(", ")}</span>
+          <div className="flex items-center gap-4"><span className="text-sm font-medium">{user!.name}</span>
+            <button onClick={logout} className="rounded-lg border px-3 py-1 text-sm hover:bg-slate-100">Log out</button></div>
+        </header>
+        <main className="p-6"><Outlet /></main>
+      </div>
+    </div>
+  );
+}
+````
+
+## `frontend/src/features/auth/AuthContext.tsx`
+
+````ts
+import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { api, refreshSession, setAccessToken } from "../../lib/api-client";
+
+export type User = { id: string; name: string; email: string; roles: string[] };
+type Ctx = { user: User | null; loading: boolean; login: (e: string, p: string) => Promise<User>; logout: () => Promise<void> };
+const AuthCtx = createContext<Ctx>(null!);
+export const useAuth = () => useContext(AuthCtx);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { refreshSession().then(setUser).finally(() => setLoading(false)); }, []);
+  const login = async (email: string, password: string) => {
+    const d = await api("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+    setAccessToken(d.accessToken); setUser(d.user); return d.user as User;
+  };
+  const logout = async () => { await api("/auth/logout", { method: "POST" }); setAccessToken(null); setUser(null); };
+  return <AuthCtx.Provider value={{ user, loading, login, logout }}>{children}</AuthCtx.Provider>;
+}
+
+export const HOME: Record<string, string> = {
+  ADMIN: "/admin/dashboard", DOCTOR: "/doctor/dashboard", NURSE: "/nurse/dashboard",
+  RECEPTIONIST: "/reception/queue", LAB: "/lab/orders", PHARMACIST: "/pharmacy/inventory", PATIENT: "/patient/dashboard",
+};
+export const homeFor = (u: User) => HOME[u.roles[0]] ?? "/login";
+````
+
+## `frontend/src/features/auth/LoginPage.tsx`
+
+````ts
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { Navigate, useNavigate } from "react-router-dom";
+import { homeFor, useAuth } from "./AuthContext";
+
+const schema = z.object({ email: z.string().email("Enter a valid email"), password: z.string().min(1, "Password is required") });
+type F = z.infer<typeof schema>;
+
+export function LoginPage() {
+  const { user, login } = useAuth();
+  const nav = useNavigate();
+  const [error, setError] = useState("");
+  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<F>({ resolver: zodResolver(schema) });
+  if (user) return <Navigate to={homeFor(user)} replace />;
+  const onSubmit = async (v: F) => {
+    setError("");
+    try { nav(homeFor(await login(v.email, v.password)), { replace: true }); }
+    catch (e) { setError((e as Error).message); }
+  };
+  const input = "w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100";
+  return (
+    <div className="grid min-h-screen place-items-center bg-gradient-to-br from-blue-50 to-sky-100 p-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="w-full max-w-sm space-y-4 rounded-2xl bg-white p-8 shadow-xl">
+        <div><h1 className="text-2xl font-bold text-blue-700">MediCore</h1><p className="text-sm text-slate-500">Sign in to your portal</p></div>
+        {error && <p role="alert" className="rounded-lg bg-red-50 p-2 text-sm text-red-700">{error}</p>}
+        <label className="block text-sm font-medium">Email
+          <input type="email" autoComplete="username" className={input} {...register("email")} />
+          {errors.email && <span className="text-xs text-red-600">{errors.email.message}</span>}
+        </label>
+        <label className="block text-sm font-medium">Password
+          <input type="password" autoComplete="current-password" className={input} {...register("password")} />
+          {errors.password && <span className="text-xs text-red-600">{errors.password.message}</span>}
+        </label>
+        <button disabled={isSubmitting} className="w-full rounded-lg bg-blue-600 py-2 font-semibold text-white hover:bg-blue-700 disabled:opacity-60">
+          {isSubmitting ? "Signing in…" : "Sign in"}
+        </button>
+      </form>
+    </div>
+  );
+}
+````
+
+## `frontend/src/lib/api-client.ts`
+
+````ts
+let accessToken: string | null = null;
+export const setAccessToken = (t: string | null) => { accessToken = t; };
+
+async function raw(path: string, init: RequestInit = {}) {
+  return fetch(`/api${path}`, {
+    ...init, credentials: "include",
+    headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}), ...init.headers },
+  });
+}
+
+export async function refreshSession() {
+  const r = await fetch("/api/auth/refresh", { method: "POST", credentials: "include" });
+  if (!r.ok) return null;
+  const d = await r.json();
+  accessToken = d.accessToken;
+  return d.user as { id: string; name: string; email: string; roles: string[] };
+}
+
+export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+  let r = await raw(path, init);
+  if (r.status === 401 && !path.startsWith("/auth/")) {
+    if (await refreshSession()) r = await raw(path, init);
+  }
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error ?? "Request failed");
+  return body;
+}
+````
+
+## `frontend/src/main.tsx`
+
+````ts
+import React from "react";
+import ReactDOM from "react-dom/client";
+import "./styles.css";
+import { App } from "./app/App";
+ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
+````
+
+## `frontend/src/pages/AppointmentsPage.tsx`
+
+````ts
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "../lib/api-client";
+import { useAuth } from "../features/auth/AuthContext";
+
+export function AppointmentsPage() {
+  const { user } = useAuth();
+  const qc = useQueryClient();
+  const isPatient = user!.roles.includes("PATIENT");
+  const appts = useQuery({ queryKey: ["appointments"], queryFn: () => api<any[]>("/appointments") });
+  const doctors = useQuery({ queryKey: ["doctors"], queryFn: () => api<any[]>("/appointments/doctors"), enabled: isPatient });
+  const [doctorId, setDoctorId] = useState(""); const [startAt, setStartAt] = useState(""); const [reason, setReason] = useState("");
+  const book = useMutation({
+    mutationFn: () => api("/appointments", { method: "POST", body: JSON.stringify({ doctorId, startAt: new Date(startAt).toISOString(), reason }) }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["appointments"] }); setReason(""); },
+  });
+  const setStatus = useMutation({
+    mutationFn: (v: { id: string; status: string }) => api(`/appointments/${v.id}/status`, { method: "PATCH", body: JSON.stringify({ status: v.status }) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["appointments"] }),
+  });
+  const isDoctor = user!.roles.includes("DOCTOR"); const isDesk = user!.roles.some((r) => ["RECEPTIONIST", "ADMIN"].includes(r));
+  const field = "rounded-lg border border-slate-300 px-3 py-2 text-sm";
+  return (
+    <div className="space-y-6">
+      <h1 className="text-2xl font-semibold">Appointments</h1>
+      {isPatient && (
+        <div className="flex flex-wrap items-end gap-3 rounded-xl bg-white p-4 shadow-sm">
+          <select className={field} value={doctorId} onChange={(e) => setDoctorId(e.target.value)}>
+            <option value="">Select doctor</option>
+            {doctors.data?.map((d) => <option key={d.id} value={d.id}>{d.user.name} — {d.speciality}</option>)}
+          </select>
+          <input type="datetime-local" className={field} value={startAt} onChange={(e) => setStartAt(e.target.value)} />
+          <input placeholder="Reason" className={field} value={reason} onChange={(e) => setReason(e.target.value)} />
+          <button disabled={!doctorId || !startAt || book.isPending} onClick={() => book.mutate()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Book</button>
+          {book.error && <span className="text-sm text-red-600">{(book.error as Error).message}</span>}
+        </div>
+      )}
+      <div className="overflow-x-auto rounded-xl bg-white shadow-sm">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-100 text-slate-600"><tr>{["When", "Patient", "Doctor", "Status", ""].map((h) => <th key={h} className="px-4 py-2">{h}</th>)}</tr></thead>
+          <tbody>
+            {appts.data?.map((a) => (
+              <tr key={a.id} className="border-t">
+                <td className="px-4 py-2">{new Date(a.startAt).toLocaleString()}</td>
+                <td className="px-4 py-2">{a.patient.user.name}</td><td className="px-4 py-2">{a.doctor.user.name}</td>
+                <td className="px-4 py-2">{a.status}</td>
+                <td className="space-x-2 px-4 py-2">
+                  {a.status === "SCHEDULED" && isDesk && <button className="text-blue-600" onClick={() => setStatus.mutate({ id: a.id, status: "CHECKED_IN" })}>Check in</button>}
+                  {isDoctor && ["CHECKED_IN", "SCHEDULED"].includes(a.status) && <button className="text-blue-600" onClick={() => setStatus.mutate({ id: a.id, status: "IN_PROGRESS" })}>Start</button>}
+                  {isDoctor && a.status === "IN_PROGRESS" && <button className="text-green-600" onClick={() => setStatus.mutate({ id: a.id, status: "COMPLETED" })}>Complete</button>}
+                  {(isPatient || isDesk) && ["SCHEDULED", "CHECKED_IN"].includes(a.status) && <button className="text-red-600" onClick={() => setStatus.mutate({ id: a.id, status: "CANCELLED" })}>Cancel</button>}
+                </td>
+              </tr>
+            ))}
+            {appts.data?.length === 0 && <tr><td colSpan={5} className="px-4 py-6 text-center text-slate-500">No appointments</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+````
+
+## `frontend/src/pages/RolePage.tsx`
+
+````ts
+export function RolePage({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="space-y-4">
+      <h1 className="text-2xl font-semibold">{title}</h1>
+      <ul className="list-disc space-y-1 rounded-xl bg-white p-6 pl-10 text-slate-700 shadow-sm">{items.map((i) => <li key={i}>{i}</li>)}</ul>
+      <p className="text-sm text-slate-500">Module scaffold: backend endpoints for these features are the next build step.</p>
+    </div>
+  );
+}
+````
+
+## `frontend/src/pages/UsersPage.tsx`
+
+````ts
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "../lib/api-client";
+
+const ROLES = ["DOCTOR", "NURSE", "RECEPTIONIST", "LAB", "PHARMACIST", "ADMIN", "PATIENT"];
+export function UsersPage() {
+  const qc = useQueryClient();
+  const users = useQuery({ queryKey: ["users"], queryFn: () => api<any[]>("/users") });
+  const [f, setF] = useState({ name: "", email: "", password: "", role: "NURSE" });
+  const create = useMutation({
+    mutationFn: () => api("/users", { method: "POST", body: JSON.stringify(f) }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["users"] }); setF({ ...f, name: "", email: "", password: "" }); },
+  });
+  const toggle = useMutation({
+    mutationFn: (u: any) => api(`/users/${u.id}/status`, { method: "PATCH", body: JSON.stringify({ status: u.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE" }) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["users"] }),
+  });
+  const field = "rounded-lg border border-slate-300 px-3 py-2 text-sm";
+  return (
+    <div className="space-y-6">
+      <h1 className="text-2xl font-semibold">User administration</h1>
+      <div className="flex flex-wrap items-end gap-3 rounded-xl bg-white p-4 shadow-sm">
+        <input placeholder="Full name" className={field} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+        <input placeholder="Email" className={field} value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} />
+        <input placeholder="Temp password (10+)" type="password" className={field} value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} />
+        <select className={field} value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })}>{ROLES.map((r) => <option key={r}>{r}</option>)}</select>
+        <button onClick={() => create.mutate()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Create</button>
+        {create.error && <span className="text-sm text-red-600">{(create.error as Error).message}</span>}
+      </div>
+      <div className="overflow-x-auto rounded-xl bg-white shadow-sm"><table className="w-full text-left text-sm">
+        <thead className="bg-slate-100"><tr>{["Name", "Email", "Role", "Status", ""].map((h) => <th key={h} className="px-4 py-2">{h}</th>)}</tr></thead>
+        <tbody>{users.data?.map((u) => (
+          <tr key={u.id} className="border-t"><td className="px-4 py-2">{u.name}</td><td className="px-4 py-2">{u.email}</td>
+            <td className="px-4 py-2">{u.roles.join(", ")}</td><td className="px-4 py-2">{u.status}</td>
+            <td className="px-4 py-2"><button className="text-blue-600" onClick={() => toggle.mutate(u)}>{u.status === "ACTIVE" ? "Suspend" : "Activate"}</button></td></tr>
+        ))}</tbody></table></div>
+    </div>
+  );
+}
+````
+
+## `frontend/src/styles.css`
+
+````css
+@import "tailwindcss";
+````
+
+## `frontend/tsconfig.json`
+
+````json
+{ "compilerOptions": { "target": "ES2022", "lib": ["ES2022","DOM","DOM.Iterable"], "module": "ESNext", "moduleResolution": "bundler", "jsx": "react-jsx", "strict": true, "skipLibCheck": true, "noEmit": true, "isolatedModules": true }, "include": ["src"] }
+````
+
+## `frontend/vite.config.ts`
+
+````ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  server: { port: 5173, proxy: { "/api": "http://localhost:4000" } },
+});
+````
