@@ -166,6 +166,80 @@ backend/
 ├── tests/
 ├── Dockerfile
 └── package.json
+
+
+## 🛠️ Complete Technology Stack
+
+### 1. Frontend — React + TypeScript
+- **React** — Build interactive user interfaces.
+- **TypeScript** — Write safer, maintainable JavaScript code.
+- **Vite** — Fast development server and build tool.
+- **Tailwind CSS** — Responsive UI styling.
+- **shadcn/ui** — Reusable interface components.
+- **React Router** — Navigation between pages.
+- **TanStack Query** — Manage API requests and server data.
+- **React Hook Form + Zod** — Form handling and validation.
+- **Recharts** — Healthcare dashboards and analytics charts.
+
+### 2. Backend — Node.js + Express
+- **Node.js** — Run JavaScript on the server.
+- **Express.js** — Build REST APIs.
+- **TypeScript** — Maintain structured backend code.
+- **Authentication and Authorization** — Secure user access based on roles.
+- **API Validation** — Validate incoming requests.
+- **Healthcare Business Logic** — Handle patients, doctors, appointments, prescriptions, and clinical records.
+
+### 3. Database — PostgreSQL + Prisma
+- **PostgreSQL** — Store structured healthcare data.
+- **Prisma ORM** — Interact with the database using TypeScript.
+- **Database Migrations** — Manage schema changes.
+- **Data Relationships** — Connect patients, doctors, appointments, medical records, and billing information.
+
+### 4. Background Jobs — Redis + BullMQ
+- **Redis** — Support caching and job queues.
+- **BullMQ** — Process background tasks.
+- Appointment reminders, email notifications, scheduled jobs, and report generation.
+
+### 5. AI and Intelligent Features — JavaScript
+- **TensorFlow.js** — Run supported machine-learning models in JavaScript.
+- **Tesseract.js** — Extract text from supported medical documents using OCR.
+- **Rule-Based Analytics** — Generate predefined alerts and insights.
+- **External AI APIs** — Integrate AI-assisted features where appropriate.
+
+### 6. Security and Privacy
+- Password hashing with Argon2id or bcrypt.
+- Role-based access control (RBAC).
+- Input validation and secure API handling.
+- Audit logging and access monitoring.
+- Secure environment variables and private file storage.
+- Patient consent and privacy safeguards.
+
+### 7. Development and Deployment
+- **Git and GitHub** — Version control and source-code management.
+- **Visual Studio Code** — Development environment.
+- **Docker and Docker Compose** — Run and manage application services.
+- **GitHub Actions** — Automate testing and deployment workflows.
+- **S3-compatible storage** — Store private documents and files.
+
+## 🏥 Main Application Modules
+- Patient Management
+- Doctor Management
+- Appointment Scheduling
+- Electronic Medical Records
+- Prescription Management
+- Laboratory Management
+- Pharmacy Management
+- Billing and Payments
+- Notifications and Reminders
+- Healthcare Analytics Dashboard
+- AI-Assisted Healthcare Features
+- Administration and Access Control
+
+## 🎯 Project Objective
+
+To build a secure, scalable, and user-friendly healthcare management platform using a JavaScript/TypeScript-centered technology stack, helping healthcare providers organize patient information, manage hospital workflows, and support efficient patient care.
+
+**Note:** Technologies listed here describe the intended stack. Update the list as you implement each feature, and use synthetic patient data during development.
 ## 🚀 Features
 
 - **Patient Management** – Maintain and manage patient information and medical records.
